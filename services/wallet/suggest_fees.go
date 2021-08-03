@@ -82,9 +82,10 @@ func (s *Service) SuggestFees() ([]*FeeSuggestion, error) {
 			// In this case getting included with a low tip is not guaranteed; instead we use the higher base fee suggestion
 			// and also offer extra tip to increase the chance of getting included in the base fee dip.
 
-			maxBaseFee.Sub(maxBaseFee, bf)
-			maxBaseFee.Mul(maxBaseFee, extraTipRatio)
-			t.Add(t, maxBaseFee)
+			tempMaxBaseFee := big.NewFloat(0)
+			tempMaxBaseFee.Sub(maxBaseFee, bf)
+			tempMaxBaseFee.Mul(tempMaxBaseFee, extraTipRatio)
+			t.Add(t, tempMaxBaseFee)
 			bf = big.NewFloat(0).Copy(maxBaseFee)
 		}
 		response[timeFactor] = &FeeSuggestion{
