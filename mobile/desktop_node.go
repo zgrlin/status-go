@@ -11,13 +11,13 @@ import (
 	gethmetrics "github.com/ethereum/go-ethereum/metrics"
 	"github.com/status-im/status-go/api"
 	"github.com/status-im/status-go/appdatabase"
+	gethbridge "github.com/status-im/status-go/eth-node/bridge/geth"
 	"github.com/status-im/status-go/eth-node/crypto"
 	"github.com/status-im/status-go/metrics"
 	nodemetrics "github.com/status-im/status-go/metrics/node"
 	"github.com/status-im/status-go/node"
 	"github.com/status-im/status-go/params"
 	protocol "github.com/status-im/status-go/protocol"
-	"github.com/status-im/status-go/signal"
 )
 
 func StartDesktopNode(configJSON string) string {
@@ -68,7 +68,7 @@ func StartDesktopNode(configJSON string) string {
 		return makeJSONResponse(err)
 	}
 
-	messenger, err := protocol.NewMessenger(identity, statusBackend.StatusNode().NodeBridge(), installationID.String(), protocol.WithDatabase(db))
+	messenger, err := protocol.NewMessenger(identity, gethbridge.NewNodeBridge(statusBackend.StatusNode().GethNode()), installationID.String(), protocol.WithDatabase(db))
 	if err != nil {
 		log.Error("failed to create messenger", "error", err)
 		return makeJSONResponse(err)
@@ -93,7 +93,7 @@ func StartDesktopNode(configJSON string) string {
 		go gethmetrics.CollectProcessMetrics(3 * time.Second)
 		go metrics.NewMetricsServer(9090, gethmetrics.DefaultRegistry).Listen()
 
-		go retrieveStats(messenger, 5*time.Second, interruptCh)
+		//go retrieveStats(messenger, 5*time.Second, interruptCh)
 		gethNode := statusBackend.StatusNode().GethNode()
 		if gethNode != nil {
 			// wait till node has been stopped
@@ -139,6 +139,7 @@ func StopNode() string {
 	return makeJSONResponse(statusBackend.StopNode())
 }
 
+/*
 func retrieveStats(messenger *protocol.Messenger, tick time.Duration, cancel <-chan struct{}) {
 	ticker := time.NewTicker(tick)
 	defer ticker.Stop()
@@ -153,3 +154,4 @@ func retrieveStats(messenger *protocol.Messenger, tick time.Duration, cancel <-c
 		}
 	}
 }
+*/
