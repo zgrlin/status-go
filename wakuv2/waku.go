@@ -33,6 +33,7 @@ import (
 
 	"github.com/libp2p/go-libp2p-core/peer"
 	"github.com/libp2p/go-libp2p-peerstore/pstoreds"
+	"github.com/libp2p/go-libp2p/p2p/protocol/identify"
 	"github.com/multiformats/go-multiaddr"
 
 	"go.uber.org/zap"
@@ -57,12 +58,10 @@ import (
 
 	libp2pproto "github.com/libp2p/go-libp2p-core/protocol"
 
-	rendezvous "github.com/status-im/go-waku-rendezvous"
 	"github.com/status-im/go-waku/waku/v2/dnsdisc"
 	"github.com/status-im/go-waku/waku/v2/protocol"
 	wakuprotocol "github.com/status-im/go-waku/waku/v2/protocol"
 	"github.com/status-im/go-waku/waku/v2/protocol/filter"
-	"github.com/status-im/go-waku/waku/v2/protocol/lightpush"
 	"github.com/status-im/go-waku/waku/v2/protocol/relay"
 
 	"github.com/status-im/status-go/eth-node/types"
@@ -117,6 +116,7 @@ type Waku struct {
 	sendQueue chan *pb.WakuMessage
 	msgQueue  chan *common.ReceivedMessage // Message queue for waku messages that havent been decoded
 	quit      chan struct{}                // Channel used for graceful exit
+	wg        sync.WaitGroup
 
 	settings   settings     // Holds configuration settings that can be dynamically changed
 	settingsMu sync.RWMutex // Mutex to sync the settings access
@@ -146,6 +146,7 @@ func New(nodeKey string, cfg *Config, logger *zap.Logger, appdb *sql.DB) (*Waku,
 		msgQueue:            make(chan *common.ReceivedMessage, messageQueueLimit),
 		sendQueue:           make(chan *pb.WakuMessage, 1000),
 		quit:                make(chan struct{}),
+		wg:                  sync.WaitGroup{},
 		dnsAddressCache:     make(map[string][]multiaddr.Multiaddr),
 		dnsAddressCacheLock: &sync.RWMutex{},
 		timeSource:          time.Now,
@@ -254,13 +255,18 @@ func New(nodeKey string, cfg *Config, logger *zap.Logger, appdb *sql.DB) (*Waku,
 		return nil, fmt.Errorf("failed to create a go-waku node: %v", err)
 	}
 
-	waku.addWakuV2Peers(cfg)
+	if err = waku.addWakuV2Peers(ctx, cfg); err != nil {
+		return nil, fmt.Errorf("failed to add wakuv2 peers: %v", err)
+	}
 
 	if err = waku.node.Start(); err != nil {
 		return nil, fmt.Errorf("failed to start go-waku node: %v", err)
 	}
 
+	waku.wg.Add(3)
+
 	go func() {
+		defer waku.wg.Done()
 		for {
 			select {
 			case <-waku.quit:
@@ -289,6 +295,7 @@ func (w *Waku) addPeers(addresses []string, protocol libp2pproto.ID, apply fnApp
 
 		if strings.HasPrefix(addrString, "enrtree://") {
 			// Use DNS Discovery
+			w.wg.Add(1)
 			go w.dnsDiscover(addrString, protocol, apply)
 		} else {
 			// It's a normal multiaddress
@@ -298,6 +305,8 @@ func (w *Waku) addPeers(addresses []string, protocol libp2pproto.ID, apply fnApp
 }
 
 func (w *Waku) dnsDiscover(enrtreeAddress string, protocol libp2pproto.ID, apply fnApplyToEachPeer) {
+	w.wg.Done()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -332,36 +341,66 @@ func (w *Waku) addPeerFromString(addrString string, protocol libp2pproto.ID, app
 	apply(addr, protocol)
 }
 
-func (w *Waku) addWakuV2Peers(cfg *Config) {
-	if !cfg.LightClient {
-		addRelayPeer := func(m multiaddr.Multiaddr, protocol libp2pproto.ID) {
-			go func(node multiaddr.Multiaddr) {
-				ctx, cancel := context.WithTimeout(context.Background(), requestTimeout)
-				defer cancel()
-				err := w.node.DialPeerWithMultiAddress(ctx, node)
+func (w *Waku) addWakuV2Peers(ctx context.Context, cfg *Config) error {
+	ids1, err := identify.NewIDService(w.node.Host())
+	if err != nil {
+		return err
+	}
+
+	defer ids1.Close()
+
+	identifyWg := sync.WaitGroup{}
+	identifyWg.Add(len(cfg.WakuNodes))
+
+	for _, n := range cfg.WakuNodes {
+		go func(n string) {
+			defer identifyWg.Done()
+			ma, err := multiaddr.NewMultiaddr(n)
+			if err != nil {
+				log.Error("could not create multiaddress", zap.Any("ma", ma), zap.Error(err))
+				return
+			}
+
+			peerInfo, err := peer.AddrInfoFromP2pAddr(ma)
+			if err != nil {
+				log.Error("could not extract peerinfo", zap.Any("ma", ma), zap.Error(err))
+				return
+			}
+
+			ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+			defer cancel()
+
+			ids1.Host.Connect(ctx, *peerInfo)
+
+			conns := ids1.Host.Network().ConnsToPeer(peerInfo.ID)
+			if len(conns) == 0 {
+				return // No connection
+			}
+
+			ids1.IdentifyConn(conns[0])
+
+			if cfg.LightClient {
+				err = ids1.Host.Network().ClosePeer(peerInfo.ID)
 				if err != nil {
-					log.Warn("could not dial peer", err)
-				} else {
-					log.Info("relay peer dialed successfully", node)
+					log.Error("could not close connections to peer", zap.Any("peer", peerInfo.ID), zap.Error(err))
 				}
-			}(m)
-		}
-		w.addPeers(cfg.RelayNodes, relay.WakuRelayID_v200, addRelayPeer)
+				return
+			}
+
+			supportedProtocols, err := ids1.Host.Peerstore().SupportsProtocols(peerInfo.ID, string(relay.WakuRelayID_v200))
+			fmt.Println(supportedProtocols)
+			if len(supportedProtocols) == 0 {
+				err = ids1.Host.Network().ClosePeer(peerInfo.ID)
+				if err != nil {
+					log.Error("could not close connections to peer", zap.Any("peer", peerInfo.ID), zap.Error(err))
+				}
+			}
+		}(n)
 	}
 
-	addToStore := func(m multiaddr.Multiaddr, protocol libp2pproto.ID) {
-		peerID, err := w.node.AddPeer(m, protocol)
-		if err != nil {
-			log.Warn("could not add peer", m, err)
-			return
-		}
-		log.Info("peer added successfully", peerID)
-	}
+	identifyWg.Wait()
 
-	w.addPeers(cfg.StoreNodes, store.StoreID_v20beta3, addToStore)
-	w.addPeers(cfg.FilterNodes, filter.FilterID_v20beta1, addToStore)
-	w.addPeers(cfg.LightpushNodes, lightpush.LightPushID_v20beta1, addToStore)
-	w.addPeers(cfg.WakuRendezvousNodes, rendezvous.RendezvousID_v001, addToStore)
+	return nil
 }
 
 func (w *Waku) GetStats() types.StatsSummary {
@@ -373,6 +412,8 @@ func (w *Waku) GetStats() types.StatsSummary {
 }
 
 func (w *Waku) runRelayMsgLoop() {
+	defer w.wg.Done()
+
 	if w.settings.LightClient {
 		return
 	}
@@ -392,6 +433,8 @@ func (w *Waku) runRelayMsgLoop() {
 }
 
 func (w *Waku) runFilterMsgLoop() {
+	defer w.wg.Done()
+
 	if !w.settings.LightClient {
 		return
 	}
@@ -899,6 +942,7 @@ func (w *Waku) Stop() error {
 	w.node.Stop()
 	close(w.quit)
 	close(w.filterMsgChannel)
+	w.wg.Wait()
 	return nil
 }
 
