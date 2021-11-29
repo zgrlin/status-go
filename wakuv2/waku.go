@@ -56,8 +56,6 @@ import (
 	"github.com/libp2p/go-libp2p-core/metrics"
 	pubsub "github.com/libp2p/go-libp2p-pubsub"
 
-	libp2pproto "github.com/libp2p/go-libp2p-core/protocol"
-
 	"github.com/status-im/go-waku/waku/v2/dnsdisc"
 	"github.com/status-im/go-waku/waku/v2/protocol"
 	wakuprotocol "github.com/status-im/go-waku/waku/v2/protocol"
@@ -285,28 +283,7 @@ func New(nodeKey string, cfg *Config, logger *zap.Logger, appdb *sql.DB) (*Waku,
 	return waku, nil
 }
 
-type fnApplyToEachPeer func(ma multiaddr.Multiaddr, protocol libp2pproto.ID)
-
-func (w *Waku) addPeers(addresses []string, protocol libp2pproto.ID, apply fnApplyToEachPeer) {
-	for _, addrString := range addresses {
-		if addrString == "" {
-			continue
-		}
-
-		if strings.HasPrefix(addrString, "enrtree://") {
-			// Use DNS Discovery
-			w.wg.Add(1)
-			go w.dnsDiscover(addrString, protocol, apply)
-		} else {
-			// It's a normal multiaddress
-			w.addPeerFromString(addrString, protocol, apply)
-		}
-	}
-}
-
-func (w *Waku) dnsDiscover(enrtreeAddress string, protocol libp2pproto.ID, apply fnApplyToEachPeer) {
-	w.wg.Done()
-
+func (w *Waku) dnsDiscover(ctx context.Context, idService *identify.IDService, enrtreeAddress string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -326,81 +303,96 @@ func (w *Waku) dnsDiscover(enrtreeAddress string, protocol libp2pproto.ID, apply
 		}
 	}
 
-	for _, m := range multiaddresses {
-		apply(m, protocol)
-	}
-}
+	wg := &sync.WaitGroup{}
+	wg.Add(len(multiaddresses))
+	for _, ma := range multiaddresses {
+		go func(ma multiaddr.Multiaddr) {
+			identifyAndConnect(ctx, w.settings.LightClient, idService, ma)
+			wg.Done()
+		}(ma)
 
-func (w *Waku) addPeerFromString(addrString string, protocol libp2pproto.ID, apply fnApplyToEachPeer) {
-	addr, err := multiaddr.NewMultiaddr(addrString)
-	if err != nil {
-		log.Warn("invalid peer multiaddress", addrString, err)
-		return
 	}
-
-	apply(addr, protocol)
+	wg.Wait()
 }
 
 func (w *Waku) addWakuV2Peers(ctx context.Context, cfg *Config) error {
-	ids1, err := identify.NewIDService(w.node.Host())
+	idService, err := identify.NewIDService(w.node.Host())
 	if err != nil {
 		return err
 	}
+	defer idService.Close()
 
-	defer ids1.Close()
-
-	identifyWg := sync.WaitGroup{}
+	identifyWg := &sync.WaitGroup{}
 	identifyWg.Add(len(cfg.WakuNodes))
-
-	for _, n := range cfg.WakuNodes {
-		go func(n string) {
-			defer identifyWg.Done()
-			ma, err := multiaddr.NewMultiaddr(n)
+	for _, addrString := range cfg.WakuNodes {
+		if strings.HasPrefix(addrString, "enrtree://") {
+			// Use DNS Discovery
+			go func() {
+				w.dnsDiscover(ctx, idService, addrString)
+				identifyWg.Done()
+			}()
+		} else {
+			// It is a normal multiaddress
+			addr, err := multiaddr.NewMultiaddr(addrString)
 			if err != nil {
-				log.Error("could not create multiaddress", zap.Any("ma", ma), zap.Error(err))
-				return
+				log.Warn("invalid peer multiaddress", addrString, err)
+				continue
 			}
 
-			peerInfo, err := peer.AddrInfoFromP2pAddr(ma)
-			if err != nil {
-				log.Error("could not extract peerinfo", zap.Any("ma", ma), zap.Error(err))
-				return
-			}
-
-			ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
-			defer cancel()
-
-			ids1.Host.Connect(ctx, *peerInfo)
-
-			conns := ids1.Host.Network().ConnsToPeer(peerInfo.ID)
-			if len(conns) == 0 {
-				return // No connection
-			}
-
-			ids1.IdentifyConn(conns[0])
-
-			if cfg.LightClient {
-				err = ids1.Host.Network().ClosePeer(peerInfo.ID)
-				if err != nil {
-					log.Error("could not close connections to peer", zap.Any("peer", peerInfo.ID), zap.Error(err))
-				}
-				return
-			}
-
-			supportedProtocols, err := ids1.Host.Peerstore().SupportsProtocols(peerInfo.ID, string(relay.WakuRelayID_v200))
-			fmt.Println(supportedProtocols)
-			if len(supportedProtocols) == 0 {
-				err = ids1.Host.Network().ClosePeer(peerInfo.ID)
-				if err != nil {
-					log.Error("could not close connections to peer", zap.Any("peer", peerInfo.ID), zap.Error(err))
-				}
-			}
-		}(n)
+			go func(ma multiaddr.Multiaddr) {
+				identifyAndConnect(ctx, cfg.LightClient, idService, ma)
+				identifyWg.Done()
+			}(addr)
+		}
 	}
 
 	identifyWg.Wait()
-
 	return nil
+}
+
+func identifyAndConnect(ctx context.Context, isLightClient bool, identifyService *identify.IDService, ma multiaddr.Multiaddr) {
+	peerInfo, err := peer.AddrInfoFromP2pAddr(ma)
+	if err != nil {
+		log.Error("could not extract peerinfo", zap.Any("ma", ma), zap.Error(err))
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(ctx, 3*time.Second)
+	defer cancel()
+
+	err = identifyService.Host.Connect(ctx, *peerInfo)
+	if err != nil {
+		log.Error("could not extract peerinfo", zap.Any("ma", ma), zap.Error(err))
+		return
+	}
+
+	conns := identifyService.Host.Network().ConnsToPeer(peerInfo.ID)
+	if len(conns) == 0 {
+		return // No connection
+	}
+
+	identifyService.IdentifyConn(conns[0])
+
+	if isLightClient {
+		err = identifyService.Host.Network().ClosePeer(peerInfo.ID)
+		if err != nil {
+			log.Error("could not close connections to peer", zap.Any("peer", peerInfo.ID), zap.Error(err))
+		}
+		return
+	}
+
+	supportedProtocols, err := identifyService.Host.Peerstore().SupportsProtocols(peerInfo.ID, string(relay.WakuRelayID_v200))
+	if err != nil {
+		log.Error("could not obtain protocols", zap.Any("peer", peerInfo.ID), zap.Error(err))
+		return
+	}
+
+	if len(supportedProtocols) == 0 {
+		err = identifyService.Host.Network().ClosePeer(peerInfo.ID)
+		if err != nil {
+			log.Error("could not close connections to peer", zap.Any("peer", peerInfo.ID), zap.Error(err))
+		}
+	}
 }
 
 func (w *Waku) GetStats() types.StatsSummary {
