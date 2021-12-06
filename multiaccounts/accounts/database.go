@@ -4,6 +4,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"time"
 
 	"github.com/status-im/status-go/eth-node/types"
 	"github.com/status-im/status-go/params"
@@ -222,7 +224,7 @@ func (db *Database) SaveSetting(setting string, value interface{}) error {
 			return ErrInvalidConfig
 		}
 		update, err = db.db.Prepare("UPDATE settings SET chaos_mode = ? WHERE synthetic_id = 'id'")
-	case "currency":
+	case Currency.ReactFieldName:
 		update, err = db.db.Prepare("UPDATE settings SET currency = ? WHERE synthetic_id = 'id'")
 	case "custom-bootnodes":
 		value = &sqlite.JSONBlob{value}
@@ -789,4 +791,30 @@ func (db *Database) ENSName() (string, error) {
 		return result.String, nil
 	}
 	return "", err
+}
+
+func (db *Database) GetSettingLastSynced(column string) (time.Time, error) {
+	var result sql.NullTime
+
+	query := "SELECT %s FROM settings_sync_clock WHERE synthetic_id = 'id'"
+	query = fmt.Sprintf(query, column)
+
+	err := db.db.QueryRow(query).Scan(&result)
+	if err != nil {
+		return time.Unix(0,0), err
+	}
+
+	if !result.Valid {
+		return time.Unix(0,0), nil
+	}
+
+	return result.Time, nil
+}
+
+func (db *Database) SetSettingLastSynced(column string, time time.Time) error {
+	query := "UPDATE settings_sync_clock SET %s = ? WHERE synthetic_id = 'id'"
+	query = fmt.Sprintf(query, column)
+
+	_, err := db.db.Exec(query, time)
+	return err
 }
