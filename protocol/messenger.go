@@ -337,7 +337,10 @@ func NewMessenger(
 	if err != nil {
 		return nil, err
 	}
-	settings := accounts.NewDB(database)
+	settings, err := accounts.NewDB(database)
+	if err != nil {
+		return nil, err
+	}
 	messenger = &Messenger{
 		config:                     &c,
 		node:                       node,
@@ -5033,6 +5036,9 @@ func (m *Messenger) BloomFilter() []byte {
 }
 
 func (m *Messenger) getSettings() (accounts.Settings, error) {
-	sDB := accounts.NewDB(m.database)
+	sDB, err := accounts.NewDB(m.database)
+	if err != nil {
+		return accounts.Settings{}, err
+	}
 	return sDB.GetSettings()
 }

@@ -290,7 +290,10 @@ func (b *GethStatusBackend) startNodeWithKey(acc multiaccounts.Account, password
 	}
 
 	b.account = &acc
-	accountsDB := accounts.NewDB(b.appDB)
+	accountsDB, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		return err
+	}
 	walletAddr, err := accountsDB.GetWalletAddress()
 	if err != nil {
 		return err
@@ -359,7 +362,10 @@ func (b *GethStatusBackend) startNodeWithAccount(acc multiaccounts.Account, pass
 		return err
 	}
 	b.account = &acc
-	accountsDB := accounts.NewDB(b.appDB)
+	accountsDB, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		return err
+	}
 	chatAddr, err := accountsDB.GetChatAddress()
 	if err != nil {
 		return err
@@ -402,7 +408,10 @@ func (b *GethStatusBackend) MigrateKeyStoreDir(acc multiaccounts.Account, passwo
 		return err
 	}
 
-	accountDB := accounts.NewDB(b.appDB)
+	accountDB, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		return err
+	}
 	accounts, err := accountDB.GetAccounts()
 	if err != nil {
 		return err
@@ -517,7 +526,10 @@ func (b *GethStatusBackend) ConvertToKeycardAccount(keyStoreDir string, account 
 		return err
 	}
 
-	accountDB := accounts.NewDB(b.appDB)
+	accountDB, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		return err
+	}
 	err = accountDB.SaveSetting("keycard-instance_uid", settings.KeycardInstanceUID)
 	if err != nil {
 		return err
@@ -563,7 +575,10 @@ func (b *GethStatusBackend) VerifyDatabasePassword(keyUID string, password strin
 		return err
 	}
 
-	accountsDB := accounts.NewDB(b.appDB)
+	accountsDB, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		return err
+	}
 	_, err = accountsDB.GetWalletAddress()
 	if err != nil {
 		return err
@@ -621,8 +636,11 @@ func (b *GethStatusBackend) StartNodeWithAccountAndConfig(
 func (b *GethStatusBackend) saveAccountsAndSettings(settings accounts.Settings, nodecfg *params.NodeConfig, subaccs []accounts.Account) error {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	accdb := accounts.NewDB(b.appDB)
-	err := accdb.CreateSettings(settings, *nodecfg)
+	accdb, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		return err
+	}
+	err = accdb.CreateSettings(settings, *nodecfg)
 	if err != nil {
 		return err
 	}
@@ -633,8 +651,11 @@ func (b *GethStatusBackend) loadNodeConfig() (*params.NodeConfig, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	var conf params.NodeConfig
-	accountDB := accounts.NewDB(b.appDB)
-	err := accountDB.GetNodeConfig(&conf)
+	accountDB, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		return nil, err
+	}
+	err = accountDB.GetNodeConfig(&conf)
 	if err != nil {
 		return nil, err
 	}
@@ -897,7 +918,11 @@ func (b *GethStatusBackend) HashTypedDataV4(typed signercore.TypedData) (types.H
 func (b *GethStatusBackend) getVerifiedWalletAccount(address, password string) (*account.SelectedExtKey, error) {
 	config := b.StatusNode().Config()
 
-	db := accounts.NewDB(b.appDB)
+	db, err := accounts.NewDB(b.appDB)
+	if err != nil {
+		b.log.Error("failed to create new *Database instance", "error", err)
+		return nil, err
+	}
 	exists, err := db.AddressExists(types.HexToAddress(address))
 	if err != nil {
 		b.log.Error("failed to query db for a given address", "address", address, "error", err)
