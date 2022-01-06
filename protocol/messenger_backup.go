@@ -118,8 +118,42 @@ func (m *Messenger) BackupData(ctx context.Context) (uint64, error) {
 		}
 
 	}
+
+	cs, err := m.communitiesManager.JoinedAndPendingCommunitiesWithRequests()
+	if err != nil {
+		return 0, err
+	}
+	for _, c := range cs {
+
+		syncMessage, err := c.ToSyncCommunityProtobuf(clock)
+		if err != nil {
+			return 0, err
+		}
+
+		backupMessage := &protobuf.Backup{
+			Communities: []*protobuf.SyncCommunity{syncMessage},
+		}
+
+		encodedMessage, err := proto.Marshal(backupMessage)
+		if err != nil {
+			return 0, err
+		}
+
+		_, err = m.dispatchMessage(ctx, common.RawMessage{
+			LocalChatID:         chat.ID,
+			Payload:             encodedMessage,
+			SkipEncryption:      true,
+			SendOnPersonalTopic: true,
+			MessageType:         protobuf.ApplicationMetadataMessage_BACKUP,
+		})
+		if err != nil {
+			return 0, err
+		}
+
+	}
+
 	chat.LastClockValue = clock
-	err := m.saveChat(chat)
+	err = m.saveChat(chat)
 	if err != nil {
 		return 0, err
 	}
