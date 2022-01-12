@@ -149,8 +149,8 @@ type Settings struct {
 
 // Database sql wrapper for operations with browser objects.
 type Database struct {
-	db *sql.DB
-	syncQueue chan SettingField
+	db        *sql.DB
+	SyncQueue chan SyncSettingField
 }
 
 var (
@@ -169,8 +169,8 @@ func NewDB(db *sql.DB) (*Database, error) {
 	}
 
 	d := &Database{
-		db: db,
-		syncQueue: make(chan SettingField, 100),
+		db:        db,
+		SyncQueue: make(chan SyncSettingField, 100),
 	}
 
 	// An empty filename means that the sqlite database is held in memory
@@ -273,9 +273,11 @@ func (db *Database) saveSetting(setting SettingField, value interface{}) error {
 		return err
 	}
 
-	value, err = setting.ValueHandler(value)
-	if err != nil {
-		return err
+	if setting.ValueHandler != nil {
+		value, err = setting.ValueHandler(value)
+		if err != nil {
+			return err
+		}
 	}
 
 	_, err = update.Exec(value)
@@ -283,7 +285,7 @@ func (db *Database) saveSetting(setting SettingField, value interface{}) error {
 }
 
 // SaveSetting stores data from any non-sync source
-// If the field requires syncing the field data is pushed on to the syncQueue
+// If the field requires syncing the field data is pushed on to the SyncQueue
 func (db *Database) SaveSetting(setting string, value interface{}) error {
 	sf, err := db.getSettingFieldFromReactName(setting)
 	if err != nil {
@@ -296,7 +298,10 @@ func (db *Database) SaveSetting(setting string, value interface{}) error {
 	}
 
 	if sf.ShouldSync {
-		db.syncQueue <- sf
+		db.SyncQueue <- SyncSettingField{
+			Field: sf,
+			Value: value,
+		}
 	}
 	return nil
 }
