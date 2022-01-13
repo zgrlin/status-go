@@ -530,7 +530,7 @@ func (m *Messenger) Start() (*MessengerResponse, error) {
 	m.watchIdentityImageChanges()
 	m.broadcastLatestUserStatus()
 	m.startBackupLoop()
-	// TODO start settings to sync loop
+	m.startSyncSettingsLoop()
 
 	if err := m.cleanTopics(); err != nil {
 		return nil, err
